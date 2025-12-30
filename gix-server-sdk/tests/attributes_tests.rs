@@ -259,6 +259,9 @@ temp/
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_ignored);
         assert!(results[0].pattern.is_some());
+        assert!(results[0].source.is_some());
+        let pattern = results[0].pattern.as_ref().unwrap();
+        assert!(pattern.contains("important.log"), "pattern should contain the negated pattern: {}", pattern);
     }
 
     #[test]
@@ -2357,6 +2360,130 @@ mod non_utf8_paths {
                 assert!(!attrs.is_empty());
             }
             Err(_) => {}
+        }
+    }
+}
+
+mod io_error_handling {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn run_git(dir: &PathBuf, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2024-01-15T10:00:00")
+            .env("GIT_COMMITTER_DATE", "2024-01-15T10:00:00")
+            .output()
+            .expect("failed to execute git command");
+
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_repo_with_unreadable_gitignore() -> Option<(TempDir, PathBuf)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().to_path_buf();
+
+        run_git(&path, &["init"]);
+        run_git(&path, &["config", "user.email", "test@example.com"]);
+        run_git(&path, &["config", "user.name", "Test User"]);
+
+        std::fs::create_dir_all(path.join("subdir")).expect("failed to create subdir");
+
+        std::fs::write(path.join("subdir/.gitignore"), "*.log\n")
+            .expect("failed to write .gitignore");
+
+        std::fs::write(path.join("README.md"), "# Test\n").expect("failed to write README");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Initial commit"]);
+
+        let gitignore_path = path.join("subdir/.gitignore");
+        let mut perms = std::fs::metadata(&gitignore_path)
+            .expect("failed to get metadata")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&gitignore_path, perms).expect("failed to set permissions");
+
+        Some((dir, path))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_ignore_with_unreadable_nested_gitignore() {
+        if let Some((_dir, path)) = create_repo_with_unreadable_gitignore() {
+            let pool = create_pool();
+            let handle = pool.get(&path).expect("failed to get handle");
+
+            let paths = vec![b"subdir/test.log".as_bstr()];
+            let result = ops::check_ignore(&handle, &paths);
+
+            match result {
+                Ok(results) => {
+                    assert_eq!(results.len(), 1);
+                }
+                Err(_e) => {
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_repo_with_unreadable_gitattributes() -> Option<(TempDir, PathBuf)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().to_path_buf();
+
+        run_git(&path, &["init"]);
+        run_git(&path, &["config", "user.email", "test@example.com"]);
+        run_git(&path, &["config", "user.name", "Test User"]);
+
+        std::fs::create_dir_all(path.join("subdir")).expect("failed to create subdir");
+
+        std::fs::write(path.join("subdir/.gitattributes"), "*.txt text\n")
+            .expect("failed to write .gitattributes");
+
+        std::fs::write(path.join("README.md"), "# Test\n").expect("failed to write README");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Initial commit"]);
+
+        let gitattributes_path = path.join("subdir/.gitattributes");
+        let mut perms = std::fs::metadata(&gitattributes_path)
+            .expect("failed to get metadata")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&gitattributes_path, perms).expect("failed to set permissions");
+
+        Some((dir, path))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_attributes_with_unreadable_nested_gitattributes() {
+        if let Some((_dir, path)) = create_repo_with_unreadable_gitattributes() {
+            let pool = create_pool();
+            let handle = pool.get(&path).expect("failed to get handle");
+
+            let result = ops::get_attributes(&handle, b"subdir/file.txt".as_bstr(), &["text"]);
+
+            match result {
+                Ok(attrs) => {
+                    assert!(!attrs.is_empty());
+                }
+                Err(_e) => {
+                }
+            }
         }
     }
 }

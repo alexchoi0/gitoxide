@@ -166,6 +166,33 @@ mod tests {
         Ok((temp_dir, pool))
     }
 
+    fn create_test_repo_with_negation() -> Result<(tempfile::TempDir, crate::RepoPool)> {
+        let temp_dir = tempfile::tempdir().map_err(SdkError::Io)?;
+        let repo_path = temp_dir.path();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(SdkError::Io)?;
+
+        std::fs::write(repo_path.join(".gitignore"), "*.log\n!important.log\n")
+            .map_err(SdkError::Io)?;
+
+        std::fs::write(repo_path.join("README.md"), "# Test\n")
+            .map_err(SdkError::Io)?;
+
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .map_err(SdkError::Io)?;
+
+        let pool = crate::RepoPool::new(crate::SdkConfig::default());
+
+        Ok((temp_dir, pool))
+    }
+
     #[test]
     fn test_check_ignore_basic() -> Result<()> {
         let (temp_dir, pool) = create_test_repo()?;
@@ -182,6 +209,27 @@ mod tests {
         assert_eq!(results.len(), 3);
         assert!(results[0].is_ignored, "*.log should be ignored");
         assert!(!results[1].is_ignored, "*.rs should not be ignored");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_ignore_with_negation_pattern() -> Result<()> {
+        let (temp_dir, pool) = create_test_repo_with_negation()?;
+        let handle = pool.get(temp_dir.path())?;
+
+        let paths: Vec<&BStr> = vec![
+            b"important.log".as_bstr(),
+            b"debug.log".as_bstr(),
+        ];
+
+        let results = check_ignore(&handle, &paths)?;
+
+        assert_eq!(results.len(), 2);
+        assert!(!results[0].is_ignored, "important.log should NOT be ignored (negated)");
+        assert!(results[0].pattern.is_some(), "should have matched negation pattern");
+        assert!(results[0].source.is_some(), "should have source for negation pattern");
+        assert!(results[1].is_ignored, "debug.log should be ignored");
 
         Ok(())
     }

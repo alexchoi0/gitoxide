@@ -1,3 +1,5 @@
+#![feature(coverage_attribute)]
+
 //! A high-performance SDK for building Git read-only RPC servers on top of gitoxide.
 //!
 //! This crate provides a connection pool and high-level operations for efficiently

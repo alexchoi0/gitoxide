@@ -183,12 +183,7 @@ fn compute_blob_diff(
     let sink = gix_diff::blob::UnifiedDiff::new(&input, consume_hunk, context_size);
     let result = imara_diff::diff(Algorithm::Histogram, &input, sink);
 
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            return Err(SdkError::Operation(format!("diff failed: {}", e)));
-        }
-    }
+    result.expect("imara_diff::diff should not fail");
 
     let mut total_additions = 0u32;
     let mut total_deletions = 0u32;

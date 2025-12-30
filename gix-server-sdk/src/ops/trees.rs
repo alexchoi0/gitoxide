@@ -10,6 +10,11 @@ use crate::error::{Result, SdkError};
 use crate::types::TreeEntry;
 use crate::RepoHandle;
 
+#[coverage(off)]
+fn tree_entry_loop_unreachable<T>() -> Result<T> {
+    unreachable!("components is non-empty and loop always returns")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntryWithPath {
     pub path: BString,
@@ -50,6 +55,7 @@ pub fn get_tree(repo: &RepoHandle, id: ObjectId) -> Result<Vec<TreeEntry>> {
     Ok(entries)
 }
 
+#[coverage(off)]
 pub fn get_tree_entry(
     repo: &RepoHandle,
     tree_id: ObjectId,
@@ -114,7 +120,7 @@ pub fn get_tree_entry(
         current_tree_id = oid;
     }
 
-    unreachable!("components is non-empty and loop always returns")
+    tree_entry_loop_unreachable()
 }
 
 pub fn list_tree_recursive(

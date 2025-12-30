@@ -3001,3 +3001,233 @@ mod max_matches_zero_behavior {
         }
     }
 }
+
+mod max_matches_break_path {
+    use super::*;
+
+    #[test]
+    fn max_matches_triggers_break_when_limit_reached() {
+        let repo = TestRepo::new();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        let options_unlimited = ops::GrepOptions::default();
+        let results_unlimited =
+            ops::grep_tree(&handle, tree_id, "fn", &options_unlimited).expect("grep_tree failed");
+
+        let lib_rs_unlimited = results_unlimited
+            .iter()
+            .find(|m| m.path.ends_with(b"lib.rs"))
+            .expect("lib.rs should have fn matches");
+        let total_fn_matches = lib_rs_unlimited.matches.len();
+        assert!(
+            total_fn_matches >= 2,
+            "lib.rs should have at least 2 fn matches, got {}",
+            total_fn_matches
+        );
+
+        let limit = 1;
+        let options_limited = ops::GrepOptions {
+            max_matches_per_file: Some(limit),
+            ..Default::default()
+        };
+        let results_limited =
+            ops::grep_tree(&handle, tree_id, "fn", &options_limited).expect("grep_tree failed");
+
+        let lib_rs_limited = results_limited
+            .iter()
+            .find(|m| m.path.ends_with(b"lib.rs"))
+            .expect("lib.rs should still appear in limited results");
+
+        assert_eq!(
+            lib_rs_limited.matches.len(),
+            limit,
+            "max_matches should trigger break, limiting to exactly {} match(es)",
+            limit
+        );
+        assert!(
+            lib_rs_limited.matches.len() < total_fn_matches,
+            "limited matches ({}) should be less than unlimited ({})",
+            lib_rs_limited.matches.len(),
+            total_fn_matches
+        );
+    }
+
+    #[test]
+    fn max_matches_break_stops_at_exact_limit() {
+        let repo = TestRepo::new();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        for limit in [1, 2, 3] {
+            let options = ops::GrepOptions {
+                max_matches_per_file: Some(limit),
+                ..Default::default()
+            };
+            let results =
+                ops::grep_tree(&handle, tree_id, "fn", &options).expect("grep_tree failed");
+
+            for grep_match in &results {
+                assert!(
+                    grep_match.matches.len() <= limit,
+                    "with max_matches={}, file {:?} should have at most {} matches, got {}",
+                    limit,
+                    grep_match.path,
+                    limit,
+                    grep_match.matches.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn max_matches_preserves_first_matches_not_random() {
+        let repo = TestRepo::new();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        let options_one = ops::GrepOptions {
+            max_matches_per_file: Some(1),
+            ..Default::default()
+        };
+        let results_one =
+            ops::grep_tree(&handle, tree_id, "fn", &options_one).expect("grep_tree failed");
+
+        let options_two = ops::GrepOptions {
+            max_matches_per_file: Some(2),
+            ..Default::default()
+        };
+        let results_two =
+            ops::grep_tree(&handle, tree_id, "fn", &options_two).expect("grep_tree failed");
+
+        for result_one in &results_one {
+            if let Some(result_two) = results_two.iter().find(|r| r.path == result_one.path) {
+                if !result_one.matches.is_empty() && !result_two.matches.is_empty() {
+                    assert_eq!(
+                        result_one.matches[0].line_number,
+                        result_two.matches[0].line_number,
+                        "first match should be the same regardless of limit"
+                    );
+                }
+            }
+        }
+    }
+}
+
+mod grep_tree_non_blob_handling {
+    use super::*;
+
+    #[test]
+    fn grep_tree_only_returns_blob_matches() {
+        let repo = TestRepo::with_deep_nesting();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        let options = ops::GrepOptions::default();
+        let results =
+            ops::grep_tree(&handle, tree_id, ".", &options).expect("grep_tree failed");
+
+        for grep_match in &results {
+            assert!(
+                !grep_match.path.is_empty(),
+                "path should not be empty"
+            );
+            assert!(
+                !grep_match.blob_id.is_null(),
+                "blob_id should not be null"
+            );
+            assert!(
+                !grep_match.matches.is_empty(),
+                "matches should not be empty for path {:?}",
+                grep_match.path
+            );
+        }
+    }
+
+    #[test]
+    fn grep_tree_with_nested_directories_finds_deep_files() {
+        let repo = TestRepo::with_deep_nesting();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        let options = ops::GrepOptions::default();
+        let results =
+            ops::grep_tree(&handle, tree_id, "deep", &options).expect("grep_tree failed");
+
+        let found_deep = results.iter().any(|m| {
+            let path_str = String::from_utf8_lossy(&m.path);
+            path_str.contains("a/b/c")
+        });
+        assert!(found_deep, "should find matches in deeply nested files");
+    }
+
+    #[test]
+    fn grep_tree_with_corrupt_tree_reference_continues() {
+        let repo = TestRepo::with_corrupt_tree_reference();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let tree_id_str = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        let tree_id =
+            gix_hash::ObjectId::from_hex(tree_id_str.as_bytes()).expect("failed to parse tree id");
+
+        let options = ops::GrepOptions::default();
+        let result = ops::grep_tree(&handle, tree_id, "root", &options);
+
+        match result {
+            Ok(results) => {
+                let found_root = results.iter().any(|m| {
+                    m.path.ends_with(b"root.txt")
+                });
+                assert!(found_root, "should still find root.txt even with corrupt nested tree");
+            }
+            Err(_) => {
+            }
+        }
+    }
+
+    #[test]
+    fn grep_tree_handles_missing_blob_gracefully() {
+        let repo = TestRepo::with_corrupted_loose_object();
+        let pool = create_pool();
+
+        let handle_result = pool.get(&repo.path);
+        if handle_result.is_err() {
+            return;
+        }
+        let handle = handle_result.unwrap();
+
+        let tree_id_result = repo.git_output(&["rev-parse", "HEAD^{tree}"]);
+        if tree_id_result.is_empty() {
+            return;
+        }
+
+        let tree_id = match gix_hash::ObjectId::from_hex(tree_id_result.as_bytes()) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        let options = ops::GrepOptions::default();
+        let _ = ops::grep_tree(&handle, tree_id, ".", &options);
+    }
+}

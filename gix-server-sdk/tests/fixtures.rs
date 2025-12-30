@@ -1262,6 +1262,34 @@ Cargo.lock text -diff
         Self { dir, path }
     }
 
+    pub fn with_merge_first_parent_path_changed() -> Self {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().to_path_buf();
+
+        run_git(&path, &["init"]);
+        run_git(&path, &["config", "user.email", "test@example.com"]);
+        run_git(&path, &["config", "user.name", "Test User"]);
+
+        std::fs::write(path.join("file.txt"), "initial\n").expect("failed to write file.txt");
+        std::fs::write(path.join("base.txt"), "base\n").expect("failed to write base.txt");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Initial commit"]);
+
+        run_git(&path, &["checkout", "-b", "branch-b"]);
+        std::fs::write(path.join("branch-b.txt"), "branch-b content\n").expect("failed to write branch-b.txt");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Add branch-b.txt on branch-b"]);
+
+        run_git(&path, &["checkout", "main"]);
+        std::fs::write(path.join("file.txt"), "modified on main\n").expect("failed to modify file.txt on main");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Modify file.txt on main"]);
+
+        run_git(&path, &["merge", "branch-b", "-m", "Merge branch-b into main"]);
+
+        Self { dir, path }
+    }
+
     #[allow(dead_code)]
     pub fn git_output(&self, args: &[&str]) -> String {
         let output = Command::new("git")

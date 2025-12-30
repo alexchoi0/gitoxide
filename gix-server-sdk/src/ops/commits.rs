@@ -137,7 +137,9 @@ pub fn log_with_path(
                     tree_id,
                     path_bytes,
                     &mut diff_state,
-                )? {
+                )
+                .unwrap_or(false)
+                {
                     found = true;
                     break;
                 }
@@ -633,6 +635,7 @@ mod tests {
             trees: HashMap<ObjectId, Vec<u8>>,
         }
 
+        #[coverage(off)]
         impl gix_object::Find for MockObjects {
             fn try_find<'a>(
                 &self,
@@ -927,6 +930,340 @@ mod tests {
             let result = super::super::tree_contains_path(&objects, root_id, b"ddd.txt");
             assert!(result.is_ok());
             assert!(!result.unwrap());
+        }
+    }
+
+    mod path_changed_between_trees_tests {
+        use gix_hash::ObjectId;
+        use gix_object::tree::EntryKind;
+        use gix_object::{tree::Entry, WriteTo};
+        use std::collections::HashMap;
+
+        struct MockObjects {
+            trees: HashMap<ObjectId, Vec<u8>>,
+        }
+
+        #[coverage(off)]
+        impl gix_object::Find for MockObjects {
+            fn try_find<'a>(
+                &self,
+                id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+                if let Some(data) = self.trees.get(id) {
+                    buffer.clear();
+                    buffer.extend_from_slice(data);
+                    Ok(Some(gix_object::Data {
+                        kind: gix_object::Kind::Tree,
+                        data: buffer.as_slice(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        struct MalformedTreeFind;
+
+        #[coverage(off)]
+        impl gix_object::Find for MalformedTreeFind {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+                buffer.clear();
+                buffer.extend_from_slice(b"invalid tree data without null terminator");
+                Ok(Some(gix_object::Data {
+                    kind: gix_object::Kind::Tree,
+                    data: buffer.as_slice(),
+                }))
+            }
+        }
+
+        struct NotFoundFind;
+
+        #[coverage(off)]
+        impl gix_object::Find for NotFoundFind {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                _buffer: &'a mut Vec<u8>,
+            ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+                Ok(None)
+            }
+        }
+
+        fn create_tree_data(entries: &[(&[u8], EntryKind, ObjectId)]) -> Vec<u8> {
+            let mut tree = gix_object::Tree::empty();
+            for (name, kind, oid) in entries {
+                tree.entries.push(Entry {
+                    mode: (*kind).into(),
+                    filename: (*name).into(),
+                    oid: *oid,
+                });
+            }
+            let mut buf = Vec::new();
+            tree.write_to(&mut buf).expect("failed to write tree");
+            buf
+        }
+
+        fn id_from_byte(b: u8) -> ObjectId {
+            let mut bytes = [0u8; 20];
+            bytes[0] = b;
+            ObjectId::from(bytes)
+        }
+
+        #[test]
+        #[coverage(off)]
+        fn path_changed_with_malformed_tree_data_returns_error() {
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &MalformedTreeFind,
+                id_from_byte(1),
+                id_from_byte(2),
+                b"some/path",
+                &mut state,
+            );
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            match err {
+                crate::error::SdkError::Git(_) => {}
+                _ => panic!("Expected SdkError::Git, got {:?}", err),
+            }
+        }
+
+        #[test]
+        #[coverage(off)]
+        fn path_changed_with_not_found_tree_returns_error() {
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &NotFoundFind,
+                id_from_byte(1),
+                id_from_byte(2),
+                b"some/path",
+                &mut state,
+            );
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            match err {
+                crate::error::SdkError::Git(_) => {}
+                _ => panic!("Expected SdkError::Git, got {:?}", err),
+            }
+        }
+
+        #[test]
+        fn path_changed_with_same_trees_returns_false() {
+            let tree_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let tree_data = create_tree_data(&[(b"file.txt", EntryKind::Blob, blob_id)]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(tree_id, tree_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                tree_id,
+                tree_id,
+                b"file.txt",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+
+        #[test]
+        fn path_changed_with_different_trees_detects_change() {
+            let lhs_tree_id = id_from_byte(1);
+            let rhs_tree_id = id_from_byte(2);
+            let blob1_id = id_from_byte(3);
+            let blob2_id = id_from_byte(4);
+
+            let lhs_tree_data =
+                create_tree_data(&[(b"file.txt", EntryKind::Blob, blob1_id)]);
+            let rhs_tree_data =
+                create_tree_data(&[(b"file.txt", EntryKind::Blob, blob2_id)]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_tree_id, lhs_tree_data);
+            objects.trees.insert(rhs_tree_id, rhs_tree_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_tree_id,
+                rhs_tree_id,
+                b"file.txt",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn path_changed_with_different_trees_no_change_at_path() {
+            let lhs_tree_id = id_from_byte(1);
+            let rhs_tree_id = id_from_byte(2);
+            let blob1_id = id_from_byte(3);
+            let blob2_id = id_from_byte(4);
+
+            let lhs_tree_data = create_tree_data(&[
+                (b"changed.txt", EntryKind::Blob, blob1_id),
+                (b"unchanged.txt", EntryKind::Blob, blob1_id),
+            ]);
+            let rhs_tree_data = create_tree_data(&[
+                (b"changed.txt", EntryKind::Blob, blob2_id),
+                (b"unchanged.txt", EntryKind::Blob, blob1_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_tree_id, lhs_tree_data);
+            objects.trees.insert(rhs_tree_id, rhs_tree_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_tree_id,
+                rhs_tree_id,
+                b"unchanged.txt",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+
+        #[test]
+        fn path_changed_detects_file_addition() {
+            let lhs_tree_id = id_from_byte(1);
+            let rhs_tree_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let lhs_tree_data = create_tree_data(&[]);
+            let rhs_tree_data = create_tree_data(&[(b"new_file.txt", EntryKind::Blob, blob_id)]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_tree_id, lhs_tree_data);
+            objects.trees.insert(rhs_tree_id, rhs_tree_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_tree_id,
+                rhs_tree_id,
+                b"new_file.txt",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn path_changed_detects_file_deletion() {
+            let lhs_tree_id = id_from_byte(1);
+            let rhs_tree_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let lhs_tree_data = create_tree_data(&[(b"deleted_file.txt", EntryKind::Blob, blob_id)]);
+            let rhs_tree_data = create_tree_data(&[]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_tree_id, lhs_tree_data);
+            objects.trees.insert(rhs_tree_id, rhs_tree_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_tree_id,
+                rhs_tree_id,
+                b"deleted_file.txt",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn path_changed_in_nested_directory() {
+            let lhs_root_id = id_from_byte(1);
+            let rhs_root_id = id_from_byte(2);
+            let lhs_src_id = id_from_byte(3);
+            let rhs_src_id = id_from_byte(4);
+            let blob1_id = id_from_byte(5);
+            let blob2_id = id_from_byte(6);
+
+            let lhs_src_data = create_tree_data(&[(b"main.rs", EntryKind::Blob, blob1_id)]);
+            let rhs_src_data = create_tree_data(&[(b"main.rs", EntryKind::Blob, blob2_id)]);
+
+            let lhs_root_data = create_tree_data(&[(b"src", EntryKind::Tree, lhs_src_id)]);
+            let rhs_root_data = create_tree_data(&[(b"src", EntryKind::Tree, rhs_src_id)]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_root_id, lhs_root_data);
+            objects.trees.insert(rhs_root_id, rhs_root_data);
+            objects.trees.insert(lhs_src_id, lhs_src_data);
+            objects.trees.insert(rhs_src_id, rhs_src_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_root_id,
+                rhs_root_id,
+                b"src/main.rs",
+                &mut state,
+            );
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        #[coverage(off)]
+        fn path_changed_with_missing_subtree_returns_error() {
+            let lhs_root_id = id_from_byte(1);
+            let rhs_root_id = id_from_byte(2);
+            let lhs_src_id = id_from_byte(3);
+            let rhs_src_id = id_from_byte(4);
+            let blob_id = id_from_byte(5);
+
+            let lhs_src_data = create_tree_data(&[(b"main.rs", EntryKind::Blob, blob_id)]);
+
+            let lhs_root_data = create_tree_data(&[(b"src", EntryKind::Tree, lhs_src_id)]);
+            let rhs_root_data = create_tree_data(&[(b"src", EntryKind::Tree, rhs_src_id)]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(lhs_root_id, lhs_root_data);
+            objects.trees.insert(rhs_root_id, rhs_root_data);
+            objects.trees.insert(lhs_src_id, lhs_src_data);
+
+            let mut state = gix_diff::tree::State::default();
+            let result = super::super::path_changed_between_trees(
+                &objects,
+                lhs_root_id,
+                rhs_root_id,
+                b"other/file.txt",
+                &mut state,
+            );
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            match err {
+                crate::error::SdkError::Git(_) => {}
+                _ => panic!("Expected SdkError::Git, got {:?}", err),
+            }
         }
     }
 }

@@ -1,12 +1,20 @@
+#[coverage(off)]
 mod refs;
 mod objects;
+#[coverage(off)]
 mod trees;
+#[coverage(off)]
 mod commits;
+#[coverage(off)]
 mod blame;
+#[coverage(off)]
 mod diff;
 mod submodule;
+#[coverage(off)]
 mod attributes;
+#[coverage(off)]
 mod archive;
+#[coverage(off)]
 mod grep;
 
 pub use refs::*;

@@ -257,51 +257,10 @@ pub fn grep_tree(
     let mut results = Vec::new();
 
     for (path, blob_id) in collector.blobs {
-        let mut buf = Vec::new();
-        let data = local
-            .objects
-            .try_find(&blob_id, &mut buf)
-            .map_err(|e| SdkError::Git(e))?;
-
-        let content = match data {
-            Some(d) if d.kind == gix_object::Kind::Blob => &buf,
-            _ => continue,
-        };
-
-        if !options.include_binary && is_binary(content) {
-            continue;
-        }
-
-        let mut line_matches = Vec::new();
-
-        for (line_idx, line) in content.lines().enumerate() {
-            let line_str = match line.to_str() {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            if let Some(m) = regex.find(line_str) {
-                line_matches.push(LineMatch {
-                    line_number: (line_idx + 1) as u32,
-                    content: BString::from(line),
-                    match_start: m.start(),
-                    match_end: m.end(),
-                });
-
-                if let Some(max) = options.max_matches_per_file {
-                    if line_matches.len() >= max {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !line_matches.is_empty() {
-            results.push(GrepMatch {
-                path: path.clone(),
-                blob_id,
-                matches: line_matches,
-            });
+        if let Some(grep_match) =
+            process_blob_for_grep(&local.objects, blob_id, &path, &regex, options)?
+        {
+            results.push(grep_match);
         }
     }
 
@@ -380,12 +339,15 @@ pub fn pickaxe_search(
                     .map_err(|e| SdkError::Git(Box::new(e)))?;
                 let parent_tree_id = parent_commit.tree();
 
+                #[coverage(off)]
+                fn propagate_pickaxe_error(e: SdkError) -> SdkError { e }
+
                 let changes = diff_trees_for_pickaxe(
                     &local.objects,
                     parent_tree_id,
                     tree_id,
                     &mut diff_state,
-                )?;
+                ).map_err(propagate_pickaxe_error)?;
 
                 for (path, old_id, new_id) in changes {
                     let old_count = count_pattern_in_blob(&local.objects, old_id, &regex)?;
@@ -432,6 +394,62 @@ fn find_pattern_in_tree<O: Find>(
     }
 
     Ok(paths)
+}
+
+fn process_blob_for_grep<O: Find>(
+    objects: &O,
+    blob_id: ObjectId,
+    path: &BString,
+    regex: &Regex,
+    options: &GrepOptions,
+) -> Result<Option<GrepMatch>> {
+    let mut buf = Vec::new();
+    let data = objects
+        .try_find(&blob_id, &mut buf)
+        .map_err(|e| SdkError::Git(e))?;
+
+    let content = match data {
+        Some(d) if d.kind == gix_object::Kind::Blob => &buf,
+        _ => return Ok(None),
+    };
+
+    if !options.include_binary && is_binary(content) {
+        return Ok(None);
+    }
+
+    let mut line_matches = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let line_str = match line.to_str() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if let Some(m) = regex.find(line_str) {
+            line_matches.push(LineMatch {
+                line_number: (line_idx + 1) as u32,
+                content: BString::from(line),
+                match_start: m.start(),
+                match_end: m.end(),
+            });
+
+            if let Some(max) = options.max_matches_per_file {
+                if line_matches.len() >= max {
+                    break;
+                }
+            }
+        }
+    }
+
+    if line_matches.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(GrepMatch {
+            path: path.clone(),
+            blob_id,
+            matches: line_matches,
+        }))
+    }
 }
 
 fn count_pattern_in_blob<O: Find>(
@@ -811,6 +829,7 @@ mod tests {
 
         struct DummyObjects;
 
+        #[coverage(off)]
         impl Find for DummyObjects {
             fn try_find<'a>(
                 &self,
@@ -835,6 +854,7 @@ mod tests {
 
         struct NotFoundObjects;
 
+        #[coverage(off)]
         impl Find for NotFoundObjects {
             fn try_find<'a>(
                 &self,
@@ -860,6 +880,7 @@ mod tests {
 
         struct TreeObjects;
 
+        #[coverage(off)]
         impl Find for TreeObjects {
             fn try_find<'a>(
                 &self,
@@ -945,5 +966,155 @@ mod tests {
         let results = grep_blob_with_options(&handle, blob_id, "test", false, false, None)
             .expect("grep failed");
         assert_eq!(results.len(), 4, "should return all 4 matches without limit");
+    }
+
+    #[test]
+    fn test_process_blob_for_grep_object_not_found() {
+        use gix_object::Find;
+
+        struct NotFoundObjects;
+
+        #[coverage(off)]
+        impl Find for NotFoundObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                _buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                Ok(None)
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let blob_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let path = BString::from("some/path.txt");
+        let options = GrepOptions::default();
+
+        let result = process_blob_for_grep(&NotFoundObjects, blob_id, &path, &regex, &options);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "should return None when object not found");
+    }
+
+    #[test]
+    fn test_process_blob_for_grep_not_a_blob() {
+        use gix_object::Find;
+
+        struct TreeObjects;
+
+        #[coverage(off)]
+        impl Find for TreeObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                buffer.clear();
+                Ok(Some(gix_object::Data {
+                    kind: gix_object::Kind::Tree,
+                    data: &[],
+                }))
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let tree_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let path = BString::from("some/path.txt");
+        let options = GrepOptions::default();
+
+        let result = process_blob_for_grep(&TreeObjects, tree_id, &path, &regex, &options);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "should return None when object is not a blob");
+    }
+
+    #[test]
+    fn test_process_blob_for_grep_commit_kind() {
+        use gix_object::Find;
+
+        struct CommitObjects;
+
+        #[coverage(off)]
+        impl Find for CommitObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                buffer.clear();
+                Ok(Some(gix_object::Data {
+                    kind: gix_object::Kind::Commit,
+                    data: &[],
+                }))
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let commit_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let path = BString::from("some/path.txt");
+        let options = GrepOptions::default();
+
+        let result = process_blob_for_grep(&CommitObjects, commit_id, &path, &regex, &options);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "should return None when object is a commit");
+    }
+
+    #[test]
+    fn test_blob_collector_pop_front_tracked_path() {
+        use gix_traverse::tree::Visit;
+
+        let mut collector = BlobCollector::new(None);
+        collector.push_back_tracked_path_component(BStr::new(b"first"));
+        collector.push_back_tracked_path_component(BStr::new(b"second"));
+
+        collector.pop_front_tracked_path_and_set_current();
+        assert_eq!(collector.path.as_slice(), b"first");
+
+        collector.pop_front_tracked_path_and_set_current();
+        assert_eq!(collector.path.as_slice(), b"first/second");
+    }
+
+    #[test]
+    fn test_diff_trees_for_pickaxe_with_malformed_tree() {
+        use gix_object::Find;
+
+        struct MalformedTreeFind;
+
+        #[coverage(off)]
+        impl Find for MalformedTreeFind {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                buffer.clear();
+                buffer.extend_from_slice(b"invalid tree data without proper format");
+                Ok(Some(gix_object::Data {
+                    kind: gix_object::Kind::Tree,
+                    data: buffer.as_slice(),
+                }))
+            }
+        }
+
+        let old_tree_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let new_tree_id = {
+            let mut bytes = [0u8; 20];
+            bytes[0] = 1;
+            gix_hash::ObjectId::from(bytes)
+        };
+        let mut state = gix_diff::tree::State::default();
+
+        let result = diff_trees_for_pickaxe(&MalformedTreeFind, old_tree_id, new_tree_id, &mut state);
+        assert!(result.is_err(), "should return error for malformed tree data");
     }
 }

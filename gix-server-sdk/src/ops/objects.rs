@@ -7,9 +7,10 @@ use crate::types::{ObjectData, ObjectInfo, ObjectKind};
 pub fn get_object(repo: &RepoHandle, id: ObjectId) -> Result<ObjectData> {
     let local = repo.to_local();
     let object = local.find_object(id).map_err(|e| {
-        if e.to_string().contains("not found") {
+        if !local.has_object(&id) {
             SdkError::ObjectNotFound(id)
         } else {
+            // Defensive: object exists but couldn't be read (corruption, IO error)
             SdkError::Git(Box::new(e))
         }
     })?;
@@ -24,9 +25,10 @@ pub fn get_object(repo: &RepoHandle, id: ObjectId) -> Result<ObjectData> {
 pub fn get_object_header(repo: &RepoHandle, id: ObjectId) -> Result<ObjectInfo> {
     let local = repo.to_local();
     let header = local.find_header(id).map_err(|e| {
-        if e.to_string().contains("not found") {
+        if !local.has_object(&id) {
             SdkError::ObjectNotFound(id)
         } else {
+            // Defensive: object exists but couldn't be read (corruption, IO error)
             SdkError::Git(Box::new(e))
         }
     })?;
@@ -60,9 +62,10 @@ pub fn resolve_revision(repo: &RepoHandle, spec: &str) -> Result<ObjectId> {
 pub fn get_blob(repo: &RepoHandle, id: ObjectId) -> Result<Vec<u8>> {
     let local = repo.to_local();
     let object = local.find_object(id).map_err(|e| {
-        if e.to_string().contains("not found") {
+        if !local.has_object(&id) {
             SdkError::ObjectNotFound(id)
         } else {
+            // Defensive: object exists but couldn't be read (corruption, IO error)
             SdkError::Git(Box::new(e))
         }
     })?;
@@ -80,9 +83,10 @@ pub fn get_blob(repo: &RepoHandle, id: ObjectId) -> Result<Vec<u8>> {
 pub fn get_blob_size(repo: &RepoHandle, id: ObjectId) -> Result<usize> {
     let local = repo.to_local();
     let header = local.find_header(id).map_err(|e| {
-        if e.to_string().contains("not found") {
+        if !local.has_object(&id) {
             SdkError::ObjectNotFound(id)
         } else {
+            // Defensive: object exists but couldn't be read (corruption, IO error)
             SdkError::Git(Box::new(e))
         }
     })?;

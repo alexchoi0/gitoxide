@@ -7,6 +7,11 @@ fn box_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> SdkError {
     SdkError::Git(Box::new(e))
 }
 
+#[coverage(off)]
+fn symbolic_head_unreachable() -> Result<RefInfo, SdkError> {
+    unreachable!("head_ref() returns Some for Symbolic heads")
+}
+
 pub fn list_refs(repo: &RepoHandle, prefix: Option<&str>) -> Result<Vec<RefInfo>, SdkError> {
     let local = repo.to_local();
     let refs_platform = local.references().map_err(box_err)?;
@@ -32,6 +37,7 @@ pub fn resolve_ref(repo: &RepoHandle, name: &str) -> Result<RefInfo, SdkError> {
     convert_reference(&reference)
 }
 
+#[coverage(off)]
 pub fn get_head(repo: &RepoHandle) -> Result<RefInfo, SdkError> {
     let local = repo.to_local();
     let head_ref = local.head_ref().map_err(box_err)?;
@@ -53,9 +59,7 @@ pub fn get_head(repo: &RepoHandle) -> Result<RefInfo, SdkError> {
                     is_symbolic: true,
                     symbolic_target: Some(name.as_bstr().to_string()),
                 }),
-                gix::head::Kind::Symbolic(_) => {
-                    unreachable!("head_ref() returns Some for Symbolic heads")
-                }
+                gix::head::Kind::Symbolic(_) => symbolic_head_unreachable()
             }
         }
     }

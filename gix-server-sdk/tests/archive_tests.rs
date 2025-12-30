@@ -2063,6 +2063,77 @@ mod archive_with_single_file_repo {
     }
 }
 
+mod archive_corrupted_objects {
+    use super::*;
+    use gix_server_sdk::ops::ArchiveFormat;
+
+    #[test]
+    fn corrupted_commit_returns_error() {
+        let repo = TestRepo::with_corrupted_loose_object();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let commit_id_str = repo.git_output(&["rev-parse", "HEAD"]);
+        let commit_id = gix_hash::ObjectId::from_hex(commit_id_str.as_bytes())
+            .expect("failed to parse commit id");
+
+        let mut output: Vec<u8> = Vec::new();
+        let result = ops::create_archive_from_commit(
+            &handle,
+            commit_id,
+            ArchiveFormat::Tar,
+            None,
+            &mut output,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn corrupted_commit_seekable_returns_error() {
+        let repo = TestRepo::with_corrupted_loose_object();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let commit_id_str = repo.git_output(&["rev-parse", "HEAD"]);
+        let commit_id = gix_hash::ObjectId::from_hex(commit_id_str.as_bytes())
+            .expect("failed to parse commit id");
+
+        let mut output = Cursor::new(Vec::new());
+        let result = ops::create_archive_from_commit_seekable(
+            &handle,
+            commit_id,
+            ArchiveFormat::Zip { compression_level: None },
+            None,
+            &mut output,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_tree_in_commit_returns_error() {
+        let repo = TestRepo::with_corrupt_tree_reference();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let commit_id_str = repo.git_output(&["rev-parse", "HEAD"]);
+        let commit_id = gix_hash::ObjectId::from_hex(commit_id_str.as_bytes())
+            .expect("failed to parse commit id");
+
+        let mut output: Vec<u8> = Vec::new();
+        let result = ops::create_archive_from_commit(
+            &handle,
+            commit_id,
+            ArchiveFormat::Tar,
+            None,
+            &mut output,
+        );
+
+        assert!(result.is_err());
+    }
+}
+
 mod archive_with_tag_objects {
     use super::*;
     use gix_server_sdk::ops::ArchiveFormat;
