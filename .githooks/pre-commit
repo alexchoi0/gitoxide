@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -e
+
+cargo fmt --check
+cargo clippy -- -D warnings
+
+# Check 100% line coverage for gix-server-sdk
+cd gix-server-sdk
+coverage_output=$(cargo llvm-cov test --quiet 2>&1)
+if echo "$coverage_output" | grep -q "gix-server-sdk.*100.00%.*100.00%"; then
+    echo "✓ gix-server-sdk: 100% coverage"
+else
+    echo "✗ gix-server-sdk coverage check failed"
+    cargo llvm-cov report 2>&1 | grep "gix-server-sdk"
+    exit 1
+fi
+cd ..
