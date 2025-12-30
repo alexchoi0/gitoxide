@@ -846,6 +846,36 @@ Cargo.lock text -diff
         Self { dir, path }
     }
 
+    pub fn with_merge_first_parent_changed() -> Self {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().to_path_buf();
+
+        run_git(&path, &["init"]);
+        run_git(&path, &["config", "user.email", "test@example.com"]);
+        run_git(&path, &["config", "user.name", "Test User"]);
+
+        std::fs::write(path.join("shared.txt"), "initial content\n")
+            .expect("failed to write shared.txt");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Initial commit"]);
+
+        run_git(&path, &["checkout", "-b", "feature"]);
+        std::fs::write(path.join("feature-only.txt"), "feature content\n")
+            .expect("failed to write feature-only.txt");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Add feature file"]);
+
+        run_git(&path, &["checkout", "main"]);
+        std::fs::write(path.join("shared.txt"), "main modified content\n")
+            .expect("failed to modify shared.txt on main");
+        run_git(&path, &["add", "."]);
+        run_git(&path, &["commit", "-m", "Modify shared.txt on main"]);
+
+        run_git(&path, &["merge", "feature", "-m", "Merge feature into main"]);
+
+        Self { dir, path }
+    }
+
     pub fn with_orphan_branch() -> Self {
         let dir = TempDir::new().expect("failed to create temp dir");
         let path = dir.path().to_path_buf();

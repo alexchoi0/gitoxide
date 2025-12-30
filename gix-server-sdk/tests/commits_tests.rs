@@ -600,6 +600,28 @@ mod log_with_path {
     }
 
     #[test]
+    fn merge_commit_first_parent_path_change() {
+        let repo = TestRepo::with_merge_first_parent_changed();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let head_id_str = repo.git_output(&["rev-parse", "HEAD"]);
+        let head_id =
+            gix_hash::ObjectId::from_hex(head_id_str.as_bytes()).expect("failed to parse head id");
+
+        let head_commit = ops::get_commit(&handle, head_id).expect("failed to get commit");
+        assert_eq!(head_commit.parent_ids.len(), 2, "HEAD should be a merge commit with 2 parents");
+
+        let result = ops::log_with_path(&handle, head_id, "shared.txt", None)
+            .expect("failed to get log");
+
+        assert!(!result.is_empty());
+
+        let merge_found = result.iter().any(|c| c.id == head_id);
+        assert!(merge_found, "merge commit should be included since shared.txt differs from first parent");
+    }
+
+    #[test]
     fn path_with_leading_slash_handled() {
         let repo = TestRepo::with_deep_paths();
         let pool = create_pool();
@@ -1413,3 +1435,28 @@ mod log_with_path_nested {
         assert_eq!(result.len(), 2);
     }
 }
+
+    #[test]
+    fn merge_commit_file_from_second_parent_triggers_first_parent_check() {
+        // This test ensures line 140 is hit - the first parent check finding a change
+        let repo = TestRepo::with_merge_first_parent_changed();
+        let pool = create_pool();
+        let handle = pool.get(&repo.path).expect("failed to get handle");
+
+        let head_id_str = repo.git_output(&["rev-parse", "HEAD"]);
+        let head_id =
+            gix_hash::ObjectId::from_hex(head_id_str.as_bytes()).expect("failed to parse head id");
+
+        // Check for feature-only.txt - this file exists in merge commit but NOT in first parent
+        // So when we check first parent, it will find the path changed (added in merge)
+        let result = ops::log_with_path(&handle, head_id, "feature-only.txt", None)
+            .expect("failed to get log");
+
+        // The merge commit should be in the results because feature-only.txt was added
+        // relative to the first parent
+        assert!(!result.is_empty(), "merge commit should be included for feature-only.txt");
+        
+        // Verify the merge commit is included
+        let has_merge = result.iter().any(|c| c.id == head_id);
+        assert!(has_merge, "merge commit should be in log_with_path results");
+    }

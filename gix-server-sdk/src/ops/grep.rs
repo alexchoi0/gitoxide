@@ -797,4 +797,89 @@ mod tests {
         content[100] = 0;
         assert!(is_binary(&content));
     }
+
+    #[test]
+    fn test_glob_match_parts_empty_pattern_nonempty_path() {
+        assert!(!glob_match_parts(&[], &["src"]));
+        assert!(!glob_match_parts(&[], &["a", "b"]));
+        assert!(!glob_match_parts(&[], &["file.rs"]));
+    }
+
+    #[test]
+    fn test_count_pattern_in_blob_none_id() {
+        use gix_object::Find;
+
+        struct DummyObjects;
+
+        impl Find for DummyObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                _buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                Ok(None)
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let result = count_pattern_in_blob(&DummyObjects, None, &regex);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_pattern_in_blob_not_found() {
+        use gix_object::Find;
+
+        struct NotFoundObjects;
+
+        impl Find for NotFoundObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                _buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                Ok(None)
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let blob_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let result = count_pattern_in_blob(&NotFoundObjects, Some(blob_id), &regex);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_pattern_in_blob_not_a_blob() {
+        use gix_object::Find;
+
+        struct TreeObjects;
+
+        impl Find for TreeObjects {
+            fn try_find<'a>(
+                &self,
+                _id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> std::result::Result<
+                Option<gix_object::Data<'a>>,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                buffer.clear();
+                Ok(Some(gix_object::Data {
+                    kind: gix_object::Kind::Tree,
+                    data: &[],
+                }))
+            }
+        }
+
+        let regex = build_regex("test", false).unwrap();
+        let tree_id = gix_hash::ObjectId::null(gix_hash::Kind::Sha1);
+        let result = count_pattern_in_blob(&TreeObjects, Some(tree_id), &regex);
+        assert_eq!(result.unwrap(), 0);
+    }
 }

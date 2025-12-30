@@ -279,31 +279,7 @@ pub fn diff_stats(
     };
 
     for entry in entries {
-        let (additions, deletions) = match entry.change {
-            ChangeKind::Added => {
-                if let Some(new_id) = entry.new_id {
-                    let line_count = count_lines_in_blob(&local.objects, new_id)?;
-                    (line_count, 0)
-                } else {
-                    (0, 0)
-                }
-            }
-            ChangeKind::Deleted => {
-                if let Some(old_id) = entry.old_id {
-                    let line_count = count_lines_in_blob(&local.objects, old_id)?;
-                    (0, line_count)
-                } else {
-                    (0, 0)
-                }
-            }
-            ChangeKind::Modified => {
-                if let (Some(old_id), Some(new_id)) = (entry.old_id, entry.new_id) {
-                    compute_line_stats(&local.objects, old_id, new_id)?
-                } else {
-                    (0, 0)
-                }
-            }
-        };
+        let (additions, deletions) = compute_entry_stats(&local.objects, &entry)?;
 
         stats.additions += additions;
         stats.deletions += deletions;
@@ -409,6 +385,37 @@ pub fn diff_blob_inline(
 ) -> Result<BlobDiff> {
     let null_id = ObjectId::null(gix_hash::Kind::Sha1);
     compute_blob_diff(null_id, null_id, old_content, new_content, context_lines)
+}
+
+fn compute_entry_stats<O: Find>(
+    objects: &O,
+    entry: &DiffEntry,
+) -> Result<(u32, u32)> {
+    match entry.change {
+        ChangeKind::Added => {
+            if let Some(new_id) = entry.new_id {
+                let line_count = count_lines_in_blob(objects, new_id)?;
+                Ok((line_count, 0))
+            } else {
+                Ok((0, 0))
+            }
+        }
+        ChangeKind::Deleted => {
+            if let Some(old_id) = entry.old_id {
+                let line_count = count_lines_in_blob(objects, old_id)?;
+                Ok((0, line_count))
+            } else {
+                Ok((0, 0))
+            }
+        }
+        ChangeKind::Modified => {
+            if let (Some(old_id), Some(new_id)) = (entry.old_id, entry.new_id) {
+                compute_line_stats(objects, old_id, new_id)
+            } else {
+                Ok((0, 0))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -550,6 +557,100 @@ mod tests {
         let new_id = ObjectId::null(gix_hash::Kind::Sha1);
 
         let result = compute_line_stats(&store, old_id, new_id).unwrap();
+        assert!(result.0 > 0 || result.1 > 0);
+    }
+
+    fn make_diff_entry(change: ChangeKind, old_id: Option<ObjectId>, new_id: Option<ObjectId>) -> DiffEntry {
+        DiffEntry {
+            path: BString::from("test.txt"),
+            change,
+            old_mode: None,
+            new_mode: None,
+            old_id,
+            new_id,
+        }
+    }
+
+    #[test]
+    fn compute_entry_stats_added_without_new_id_returns_zero() {
+        let store = MockObjectStore::new_blob(b"content\n");
+        let entry = make_diff_entry(ChangeKind::Added, None, None);
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_added_with_new_id_counts_lines() {
+        let store = MockObjectStore::new_blob(b"line1\nline2\n");
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let entry = make_diff_entry(ChangeKind::Added, None, Some(new_id));
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (3, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_deleted_without_old_id_returns_zero() {
+        let store = MockObjectStore::new_blob(b"content\n");
+        let entry = make_diff_entry(ChangeKind::Deleted, None, None);
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_deleted_with_old_id_counts_lines() {
+        let store = MockObjectStore::new_blob(b"line1\nline2\nline3\n");
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let entry = make_diff_entry(ChangeKind::Deleted, Some(old_id), None);
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 4));
+    }
+
+    #[test]
+    fn compute_entry_stats_modified_without_old_id_returns_zero() {
+        let store = MockObjectStore::new_blob(b"content\n");
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let entry = make_diff_entry(ChangeKind::Modified, None, Some(new_id));
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_modified_without_new_id_returns_zero() {
+        let store = MockObjectStore::new_blob(b"content\n");
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let entry = make_diff_entry(ChangeKind::Modified, Some(old_id), None);
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_modified_without_both_ids_returns_zero() {
+        let store = MockObjectStore::new_blob(b"content\n");
+        let entry = make_diff_entry(ChangeKind::Modified, None, None);
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_entry_stats_modified_with_both_ids_computes_diff() {
+        let store = DualMockStore::new(
+            gix_object::Kind::Blob,
+            gix_object::Kind::Blob,
+            b"old\n".to_vec(),
+            b"new\n".to_vec(),
+        );
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let entry = make_diff_entry(ChangeKind::Modified, Some(old_id), Some(new_id));
+
+        let result = compute_entry_stats(&store, &entry).unwrap();
         assert!(result.0 > 0 || result.1 > 0);
     }
 }
