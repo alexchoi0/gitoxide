@@ -14,10 +14,15 @@
 mod pool;
 mod config;
 mod error;
-mod types;
+pub mod types;
 pub mod ops;
 
 pub use pool::{RepoPool, RepoHandle};
 pub use config::SdkConfig;
 pub use error::SdkError;
-pub use types::PoolStats;
+pub use types::{
+    PoolStats, ObjectKind, ObjectInfo, ObjectData, TreeEntry, EntryMode,
+    CommitInfo, Signature, ChangeKind, DiffEntry, BlobDiff, DiffHunk,
+    DiffLine, DiffLineKind, DiffStats, FileStats, BlameResult, BlameEntry,
+    BlameStatistics, BlameOptions, RefInfo,
+};

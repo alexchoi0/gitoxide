@@ -245,9 +245,11 @@ fn path_changed_between_trees(
         changed: false,
     };
 
-    gix_diff::tree(lhs_iter, rhs_iter, state, objects, &mut recorder)?;
-
-    Ok(recorder.changed)
+    match gix_diff::tree(lhs_iter, rhs_iter, state, objects, &mut recorder) {
+        Ok(()) => Ok(recorder.changed),
+        Err(gix_diff::tree::Error::Cancelled) => Ok(recorder.changed),
+        Err(e) => Err(SdkError::Git(Box::new(e))),
+    }
 }
 
 struct PathChangeRecorder {
@@ -365,4 +367,566 @@ pub fn count_commits(
     }
 
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gix_diff::tree::Visit;
+    use gix_object::tree::EntryKind;
+
+    #[test]
+    fn path_change_recorder_push_path_component_empty_path() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/main.rs".to_vec(),
+            current_path: Vec::new(),
+            changed: false,
+        };
+
+        recorder.push_path_component(b"src".into());
+        assert_eq!(recorder.current_path, b"src");
+    }
+
+    #[test]
+    fn path_change_recorder_push_path_component_adds_separator() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/main.rs".to_vec(),
+            current_path: b"src".to_vec(),
+            changed: false,
+        };
+
+        recorder.push_path_component(b"main.rs".into());
+        assert_eq!(recorder.current_path, b"src/main.rs");
+    }
+
+    #[test]
+    fn path_change_recorder_push_back_tracked_path_component_empty() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"a/b/c".to_vec(),
+            current_path: Vec::new(),
+            changed: false,
+        };
+
+        recorder.push_back_tracked_path_component(b"a".into());
+        assert_eq!(recorder.current_path, b"a");
+    }
+
+    #[test]
+    fn path_change_recorder_push_back_tracked_path_component_with_separator() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"a/b/c".to_vec(),
+            current_path: b"a".to_vec(),
+            changed: false,
+        };
+
+        recorder.push_back_tracked_path_component(b"b".into());
+        assert_eq!(recorder.current_path, b"a/b");
+    }
+
+    #[test]
+    fn path_change_recorder_pop_path_component_single() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src".to_vec(),
+            current_path: b"src".to_vec(),
+            changed: false,
+        };
+
+        recorder.pop_path_component();
+        assert!(recorder.current_path.is_empty());
+    }
+
+    #[test]
+    fn path_change_recorder_pop_path_component_nested() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/main.rs".to_vec(),
+            current_path: b"src/main.rs".to_vec(),
+            changed: false,
+        };
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"src");
+    }
+
+    #[test]
+    fn path_change_recorder_pop_path_component_deeply_nested() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"a/b/c/d".to_vec(),
+            current_path: b"a/b/c/d".to_vec(),
+            changed: false,
+        };
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"a/b/c");
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"a/b");
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"a");
+
+        recorder.pop_path_component();
+        assert!(recorder.current_path.is_empty());
+    }
+
+    #[test]
+    fn path_change_recorder_pop_front_tracked_path_and_set_current_is_noop() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"test".to_vec(),
+            current_path: b"something".to_vec(),
+            changed: false,
+        };
+
+        recorder.pop_front_tracked_path_and_set_current();
+        assert_eq!(recorder.current_path, b"something");
+    }
+
+    #[test]
+    fn path_change_recorder_visit_exact_match_cancels() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/lib.rs".to_vec(),
+            current_path: b"src/lib.rs".to_vec(),
+            changed: false,
+        };
+
+        let change = gix_diff::tree::visit::Change::Modification {
+            previous_entry_mode: EntryKind::Blob.into(),
+            previous_oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+            entry_mode: EntryKind::Blob.into(),
+            oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+        };
+
+        let action = recorder.visit(change);
+        assert!(recorder.changed);
+        assert!(action.cancelled());
+    }
+
+    #[test]
+    fn path_change_recorder_visit_target_starts_with_current() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/main.rs".to_vec(),
+            current_path: b"src".to_vec(),
+            changed: false,
+        };
+
+        let change = gix_diff::tree::visit::Change::Addition {
+            entry_mode: EntryKind::Tree.into(),
+            oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+            relation: None,
+        };
+
+        let action = recorder.visit(change);
+        assert!(recorder.changed);
+        assert!(action.cancelled());
+    }
+
+    #[test]
+    fn path_change_recorder_visit_current_starts_with_target() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src".to_vec(),
+            current_path: b"src/lib.rs".to_vec(),
+            changed: false,
+        };
+
+        let change = gix_diff::tree::visit::Change::Deletion {
+            entry_mode: EntryKind::Blob.into(),
+            oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+            relation: None,
+        };
+
+        let action = recorder.visit(change);
+        assert!(recorder.changed);
+        assert!(action.cancelled());
+    }
+
+    #[test]
+    fn path_change_recorder_visit_no_match_continues() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"src/lib.rs".to_vec(),
+            current_path: b"tests/mod.rs".to_vec(),
+            changed: false,
+        };
+
+        let change = gix_diff::tree::visit::Change::Modification {
+            previous_entry_mode: EntryKind::Blob.into(),
+            previous_oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+            entry_mode: EntryKind::Blob.into(),
+            oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+        };
+
+        let action = recorder.visit(change);
+        assert!(!recorder.changed);
+        assert!(!action.cancelled());
+    }
+
+    #[test]
+    fn path_change_recorder_full_traversal_simulation() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"a/b/c.txt".to_vec(),
+            current_path: Vec::new(),
+            changed: false,
+        };
+
+        recorder.push_path_component(b"a".into());
+        assert_eq!(recorder.current_path, b"a");
+
+        recorder.push_path_component(b"b".into());
+        assert_eq!(recorder.current_path, b"a/b");
+
+        recorder.push_path_component(b"c.txt".into());
+        assert_eq!(recorder.current_path, b"a/b/c.txt");
+
+        let change = gix_diff::tree::visit::Change::Modification {
+            previous_entry_mode: EntryKind::Blob.into(),
+            previous_oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+            entry_mode: EntryKind::Blob.into(),
+            oid: gix_hash::ObjectId::null(gix_hash::Kind::Sha1),
+        };
+
+        let action = recorder.visit(change);
+        assert!(recorder.changed);
+        assert!(action.cancelled());
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"a/b");
+
+        recorder.pop_path_component();
+        assert_eq!(recorder.current_path, b"a");
+
+        recorder.pop_path_component();
+        assert!(recorder.current_path.is_empty());
+    }
+
+    #[test]
+    fn path_change_recorder_push_back_tracked_multiple() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"x/y/z".to_vec(),
+            current_path: Vec::new(),
+            changed: false,
+        };
+
+        recorder.push_back_tracked_path_component(b"x".into());
+        recorder.push_back_tracked_path_component(b"y".into());
+        recorder.push_back_tracked_path_component(b"z".into());
+
+        assert_eq!(recorder.current_path, b"x/y/z");
+    }
+
+    #[test]
+    fn path_change_recorder_pop_empty_path() {
+        let mut recorder = PathChangeRecorder {
+            target_path: b"test".to_vec(),
+            current_path: Vec::new(),
+            changed: false,
+        };
+
+        recorder.pop_path_component();
+        assert!(recorder.current_path.is_empty());
+    }
+
+    mod tree_contains_path_tests {
+        use gix_object::{tree::Entry, WriteTo};
+        use gix_hash::ObjectId;
+        use gix_object::tree::EntryKind;
+        use std::collections::HashMap;
+
+        struct MockObjects {
+            trees: HashMap<ObjectId, Vec<u8>>,
+        }
+
+        impl gix_object::Find for MockObjects {
+            fn try_find<'a>(
+                &self,
+                id: &gix_hash::oid,
+                buffer: &'a mut Vec<u8>,
+            ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+                if let Some(data) = self.trees.get(id) {
+                    buffer.clear();
+                    buffer.extend_from_slice(data);
+                    Ok(Some(gix_object::Data {
+                        kind: gix_object::Kind::Tree,
+                        data: buffer.as_slice(),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        fn create_tree_data(entries: &[(&[u8], EntryKind, ObjectId)]) -> Vec<u8> {
+            let mut tree = gix_object::Tree::empty();
+            for (name, kind, oid) in entries {
+                tree.entries.push(Entry {
+                    mode: (*kind).into(),
+                    filename: (*name).into(),
+                    oid: *oid,
+                });
+            }
+            let mut buf = Vec::new();
+            tree.write_to(&mut buf).expect("failed to write tree");
+            buf
+        }
+
+        fn id_from_byte(b: u8) -> ObjectId {
+            let mut bytes = [0u8; 20];
+            bytes[0] = b;
+            ObjectId::from(bytes)
+        }
+
+        #[test]
+        fn path_with_empty_components_skipped() {
+            let tree_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let tree_data = create_tree_data(&[
+                (b"file.txt", EntryKind::Blob, blob_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(tree_id, tree_data);
+
+            let result = super::super::tree_contains_path(&objects, tree_id, b"//file.txt");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+
+            let result = super::super::tree_contains_path(&objects, tree_id, b"file.txt//");
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn path_not_found_returns_false() {
+            let tree_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let tree_data = create_tree_data(&[
+                (b"existing.txt", EntryKind::Blob, blob_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(tree_id, tree_data);
+
+            let result = super::super::tree_contains_path(&objects, tree_id, b"nonexistent.txt");
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+
+        #[test]
+        fn file_in_nested_directory() {
+            let root_tree_id = id_from_byte(1);
+            let src_tree_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let src_tree_data = create_tree_data(&[
+                (b"main.rs", EntryKind::Blob, blob_id),
+            ]);
+
+            let root_tree_data = create_tree_data(&[
+                (b"src", EntryKind::Tree, src_tree_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_tree_id, root_tree_data);
+            objects.trees.insert(src_tree_id, src_tree_data);
+
+            let result = super::super::tree_contains_path(&objects, root_tree_id, b"src/main.rs");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn directory_path_returns_true() {
+            let root_tree_id = id_from_byte(1);
+            let src_tree_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let src_tree_data = create_tree_data(&[
+                (b"main.rs", EntryKind::Blob, blob_id),
+            ]);
+
+            let root_tree_data = create_tree_data(&[
+                (b"src", EntryKind::Tree, src_tree_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_tree_id, root_tree_data);
+            objects.trees.insert(src_tree_id, src_tree_data);
+
+            let result = super::super::tree_contains_path(&objects, root_tree_id, b"src");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn deeply_nested_file() {
+            let root_id = id_from_byte(1);
+            let a_id = id_from_byte(2);
+            let b_id = id_from_byte(3);
+            let c_id = id_from_byte(4);
+            let blob_id = id_from_byte(5);
+
+            let c_tree = create_tree_data(&[
+                (b"deep.txt", EntryKind::Blob, blob_id),
+            ]);
+            let b_tree = create_tree_data(&[
+                (b"c", EntryKind::Tree, c_id),
+            ]);
+            let a_tree = create_tree_data(&[
+                (b"b", EntryKind::Tree, b_id),
+            ]);
+            let root_tree = create_tree_data(&[
+                (b"a", EntryKind::Tree, a_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+            objects.trees.insert(a_id, a_tree);
+            objects.trees.insert(b_id, b_tree);
+            objects.trees.insert(c_id, c_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"a/b/c/deep.txt");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn partial_path_not_found_in_nested_tree() {
+            let root_id = id_from_byte(1);
+            let src_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let src_tree = create_tree_data(&[
+                (b"lib.rs", EntryKind::Blob, blob_id),
+            ]);
+            let root_tree = create_tree_data(&[
+                (b"src", EntryKind::Tree, src_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+            objects.trees.insert(src_id, src_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"src/nonexistent.rs");
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+
+        #[test]
+        fn file_treated_as_directory_returns_true() {
+            let root_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let root_tree = create_tree_data(&[
+                (b"file.txt", EntryKind::Blob, blob_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"file.txt/nested");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn empty_path_returns_true() {
+            let root_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let root_tree = create_tree_data(&[
+                (b"file.txt", EntryKind::Blob, blob_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn path_only_slashes_returns_true() {
+            let root_id = id_from_byte(1);
+            let blob_id = id_from_byte(2);
+
+            let root_tree = create_tree_data(&[
+                (b"file.txt", EntryKind::Blob, blob_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"///");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+        }
+
+        #[test]
+        fn intermediate_directory_not_found() {
+            let root_id = id_from_byte(1);
+            let src_id = id_from_byte(2);
+            let blob_id = id_from_byte(3);
+
+            let src_tree = create_tree_data(&[
+                (b"main.rs", EntryKind::Blob, blob_id),
+            ]);
+            let root_tree = create_tree_data(&[
+                (b"src", EntryKind::Tree, src_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+            objects.trees.insert(src_id, src_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"lib/main.rs");
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+
+        #[test]
+        fn multiple_entries_in_tree() {
+            let root_id = id_from_byte(1);
+            let blob1_id = id_from_byte(2);
+            let blob2_id = id_from_byte(3);
+            let blob3_id = id_from_byte(4);
+
+            let root_tree = create_tree_data(&[
+                (b"aaa.txt", EntryKind::Blob, blob1_id),
+                (b"bbb.txt", EntryKind::Blob, blob2_id),
+                (b"ccc.txt", EntryKind::Blob, blob3_id),
+            ]);
+
+            let mut objects = MockObjects {
+                trees: HashMap::new(),
+            };
+            objects.trees.insert(root_id, root_tree);
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"bbb.txt");
+            assert!(result.is_ok());
+            assert!(result.unwrap());
+
+            let result = super::super::tree_contains_path(&objects, root_id, b"ddd.txt");
+            assert!(result.is_ok());
+            assert!(!result.unwrap());
+        }
+    }
 }

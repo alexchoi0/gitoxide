@@ -19,3 +19,9 @@ pub use submodule::*;
 pub use attributes::*;
 pub use archive::*;
 pub use grep::*;
+
+pub use crate::types::{
+    ChangeKind, DiffEntry, BlobDiff, DiffHunk, DiffLine, DiffLineKind, DiffStats, FileStats,
+    EntryMode, TreeEntry, RefInfo, ObjectInfo, ObjectData, ObjectKind, CommitInfo, Signature,
+    BlameResult, BlameEntry, BlameStatistics, BlameOptions,
+};

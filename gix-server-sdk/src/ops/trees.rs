@@ -97,34 +97,47 @@ pub fn get_tree_entry(
             }
         }
 
-        match found_entry {
-            Some((oid, mode, name)) => {
-                if idx == components.len() - 1 {
-                    return Ok(TreeEntry {
-                        name,
-                        id: oid,
-                        mode: mode.into(),
-                    });
-                } else {
-                    if !mode.is_tree() {
-                        return Err(SdkError::TreeEntryNotFound(path.to_string()));
-                    }
-                    current_tree_id = oid;
-                }
-            }
-            None => {
-                return Err(SdkError::TreeEntryNotFound(path.to_string()));
-            }
+        let (oid, mode, name) = found_entry
+            .ok_or_else(|| SdkError::TreeEntryNotFound(path.to_string()))?;
+
+        if idx == components.len() - 1 {
+            return Ok(TreeEntry {
+                name,
+                id: oid,
+                mode: mode.into(),
+            });
         }
+
+        if !mode.is_tree() {
+            return Err(SdkError::TreeEntryNotFound(path.to_string()));
+        }
+        current_tree_id = oid;
     }
 
-    Err(SdkError::TreeEntryNotFound(path.to_string()))
+    unreachable!("components is non-empty and loop always returns")
 }
 
 pub fn list_tree_recursive(
     repo: &RepoHandle,
     tree_id: ObjectId,
     max_depth: Option<usize>,
+) -> Result<Vec<TreeEntryWithPath>> {
+    list_tree_recursive_impl(repo, tree_id, max_depth, false)
+}
+
+pub fn list_tree_recursive_breadthfirst(
+    repo: &RepoHandle,
+    tree_id: ObjectId,
+    max_depth: Option<usize>,
+) -> Result<Vec<TreeEntryWithPath>> {
+    list_tree_recursive_impl(repo, tree_id, max_depth, true)
+}
+
+fn list_tree_recursive_impl(
+    repo: &RepoHandle,
+    tree_id: ObjectId,
+    max_depth: Option<usize>,
+    breadthfirst: bool,
 ) -> Result<Vec<TreeEntryWithPath>> {
     let local = repo.to_local();
 
@@ -141,10 +154,21 @@ pub fn list_tree_recursive(
     }
 
     let mut recorder = DepthLimitedRecorder::new(max_depth);
-    let mut state = gix_traverse::tree::depthfirst::State::default();
 
-    gix_traverse::tree::depthfirst(tree_id, &mut state, &local.objects, &mut recorder)
-        .map_err(|e| SdkError::Git(Box::new(e)))?;
+    if breadthfirst {
+        let mut buf = Vec::new();
+        let tree_iter = local
+            .objects
+            .find_tree_iter(&tree_id, &mut buf)
+            .map_err(|_| SdkError::ObjectNotFound(tree_id))?;
+        let mut state = gix_traverse::tree::breadthfirst::State::default();
+        gix_traverse::tree::breadthfirst(tree_iter, &mut state, &local.objects, &mut recorder)
+            .map_err(|e| SdkError::Git(Box::new(e)))?;
+    } else {
+        let mut state = gix_traverse::tree::depthfirst::State::default();
+        gix_traverse::tree::depthfirst(tree_id, &mut state, &local.objects, &mut recorder)
+            .map_err(|e| SdkError::Git(Box::new(e)))?;
+    }
 
     Ok(recorder.entries)
 }

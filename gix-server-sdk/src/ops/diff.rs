@@ -410,3 +410,146 @@ pub fn diff_blob_inline(
     let null_id = ObjectId::null(gix_hash::Kind::Sha1);
     compute_blob_diff(null_id, null_id, old_content, new_content, context_lines)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockObjectStore {
+        kind: gix_object::Kind,
+        data: Vec<u8>,
+    }
+
+    impl MockObjectStore {
+        fn new_blob(data: &[u8]) -> Self {
+            MockObjectStore {
+                kind: gix_object::Kind::Blob,
+                data: data.to_vec(),
+            }
+        }
+
+        fn new_non_blob(kind: gix_object::Kind) -> Self {
+            MockObjectStore { kind, data: vec![] }
+        }
+    }
+
+    impl gix_object::Find for MockObjectStore {
+        fn try_find<'a>(
+            &self,
+            _id: &gix_hash::oid,
+            buffer: &'a mut Vec<u8>,
+        ) -> std::result::Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            buffer.clear();
+            buffer.extend_from_slice(&self.data);
+            Ok(Some(gix_object::Data {
+                kind: self.kind,
+                data: buffer.as_slice(),
+            }))
+        }
+    }
+
+    #[test]
+    fn count_lines_in_blob_returns_zero_for_non_blob() {
+        let store = MockObjectStore::new_non_blob(gix_object::Kind::Tree);
+        let blob_id = ObjectId::null(gix_hash::Kind::Sha1);
+
+        let result = count_lines_in_blob(&store, blob_id).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn count_lines_in_blob_counts_correctly() {
+        let store = MockObjectStore::new_blob(b"line1\nline2\nline3\n");
+        let blob_id = ObjectId::null(gix_hash::Kind::Sha1);
+
+        let result = count_lines_in_blob(&store, blob_id).unwrap();
+        assert_eq!(result, 4);
+    }
+
+    #[test]
+    fn compute_line_stats_returns_zero_for_non_blob_old() {
+        let store = MockObjectStore::new_non_blob(gix_object::Kind::Commit);
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+
+        let result = compute_line_stats(&store, old_id, new_id).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    struct DualMockStore {
+        old_kind: gix_object::Kind,
+        new_kind: gix_object::Kind,
+        old_data: Vec<u8>,
+        new_data: Vec<u8>,
+        call_count: std::cell::RefCell<usize>,
+    }
+
+    impl DualMockStore {
+        fn new(
+            old_kind: gix_object::Kind,
+            new_kind: gix_object::Kind,
+            old_data: Vec<u8>,
+            new_data: Vec<u8>,
+        ) -> Self {
+            DualMockStore {
+                old_kind,
+                new_kind,
+                old_data,
+                new_data,
+                call_count: std::cell::RefCell::new(0),
+            }
+        }
+    }
+
+    impl gix_object::Find for DualMockStore {
+        fn try_find<'a>(
+            &self,
+            _id: &gix_hash::oid,
+            buffer: &'a mut Vec<u8>,
+        ) -> std::result::Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            let mut count = self.call_count.borrow_mut();
+            let (kind, data) = if *count == 0 {
+                (*count, _) = count.overflowing_add(1);
+                (self.old_kind, &self.old_data)
+            } else {
+                (self.new_kind, &self.new_data)
+            };
+            buffer.clear();
+            buffer.extend_from_slice(data);
+            Ok(Some(gix_object::Data {
+                kind,
+                data: buffer.as_slice(),
+            }))
+        }
+    }
+
+    #[test]
+    fn compute_line_stats_returns_zero_for_non_blob_new() {
+        let store = DualMockStore::new(
+            gix_object::Kind::Blob,
+            gix_object::Kind::Tree,
+            b"content".to_vec(),
+            vec![],
+        );
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+
+        let result = compute_line_stats(&store, old_id, new_id).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    #[test]
+    fn compute_line_stats_handles_blob_modifications() {
+        let store = DualMockStore::new(
+            gix_object::Kind::Blob,
+            gix_object::Kind::Blob,
+            b"old\n".to_vec(),
+            b"new\n".to_vec(),
+        );
+        let old_id = ObjectId::null(gix_hash::Kind::Sha1);
+        let new_id = ObjectId::null(gix_hash::Kind::Sha1);
+
+        let result = compute_line_stats(&store, old_id, new_id).unwrap();
+        assert!(result.0 > 0 || result.1 > 0);
+    }
+}

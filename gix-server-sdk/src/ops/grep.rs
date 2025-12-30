@@ -647,4 +647,154 @@ mod tests {
         assert!(!opts.include_binary);
         assert!(opts.path_pattern.is_none());
     }
+
+    #[test]
+    fn test_matches_glob_non_utf8_path() {
+        let non_utf8: &[u8] = &[0xFF, 0xFE, b'.', b'r', b's'];
+        assert!(!matches_glob(BStr::new(non_utf8), "*.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_parts_pattern_longer_than_path() {
+        assert!(!glob_match_parts(&["src", "foo", "bar.rs"], &["src"]));
+        assert!(!glob_match_parts(&["a", "b", "c"], &[]));
+    }
+
+    #[test]
+    fn test_glob_match_chars_question_on_empty() {
+        assert!(!glob_match_chars(&['?'], &[]));
+        assert!(!glob_match_chars(&['?', 'a'], &[]));
+    }
+
+    #[test]
+    fn test_glob_match_chars_literal_on_empty() {
+        assert!(!glob_match_chars(&['a'], &[]));
+        assert!(!glob_match_chars(&['x', 'y', 'z'], &[]));
+    }
+
+    #[test]
+    fn test_glob_match_chars_mismatch() {
+        assert!(!glob_match_chars(&['a'], &['b']));
+        assert!(!glob_match_chars(&['x', 'y'], &['x', 'z']));
+    }
+
+    #[test]
+    fn test_blob_collector_pop_element_no_slash() {
+        let mut collector = BlobCollector::new(None);
+        collector.path = BString::from("filename");
+        collector.pop_element();
+        assert!(collector.path.is_empty());
+    }
+
+    #[test]
+    fn test_blob_collector_pop_element_with_slash() {
+        let mut collector = BlobCollector::new(None);
+        collector.path = BString::from("dir/subdir/file");
+        collector.pop_element();
+        assert_eq!(collector.path.as_slice(), b"dir/subdir");
+    }
+
+    #[test]
+    fn test_blob_collector_push_element_empty() {
+        let mut collector = BlobCollector::new(None);
+        collector.path = BString::from("existing");
+        collector.push_element(BStr::new(b""));
+        assert_eq!(collector.path.as_slice(), b"existing");
+    }
+
+    #[test]
+    fn test_blob_collector_push_element_to_empty_path() {
+        let mut collector = BlobCollector::new(None);
+        collector.push_element(BStr::new(b"first"));
+        assert_eq!(collector.path.as_slice(), b"first");
+    }
+
+    #[test]
+    fn test_blob_collector_push_element_to_existing_path() {
+        let mut collector = BlobCollector::new(None);
+        collector.path = BString::from("dir");
+        collector.push_element(BStr::new(b"file"));
+        assert_eq!(collector.path.as_slice(), b"dir/file");
+    }
+
+    #[test]
+    fn test_blob_collector_pop_back_tracked_empty_deque() {
+        let mut collector = BlobCollector::new(None);
+        collector.path = BString::from("something");
+        collector.pop_back_tracked_path_and_set_current();
+        assert!(collector.path.is_empty());
+    }
+
+    #[test]
+    fn test_blob_collector_should_include_path_no_pattern() {
+        let collector = BlobCollector::new(None);
+        assert!(collector.should_include_path(BStr::new(b"any/path.rs")));
+    }
+
+    #[test]
+    fn test_blob_collector_should_include_path_with_pattern() {
+        let collector = BlobCollector::new(Some("*.rs".to_string()));
+        assert!(collector.should_include_path(BStr::new(b"file.rs")));
+        assert!(!collector.should_include_path(BStr::new(b"file.txt")));
+    }
+
+    #[test]
+    fn test_build_regex_invalid() {
+        let result = build_regex("[invalid(", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_regex_valid() {
+        let result = build_regex("hello.*world", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_regex_case_insensitive() {
+        let regex = build_regex("hello", true).unwrap();
+        assert!(regex.is_match("HELLO"));
+        assert!(regex.is_match("hello"));
+    }
+
+    #[test]
+    fn test_glob_double_star_matches_empty_path() {
+        assert!(glob_match_parts(&["**"], &[]));
+        assert!(glob_match_parts(&["**"], &["a", "b", "c"]));
+    }
+
+    #[test]
+    fn test_glob_double_star_followed_by_pattern() {
+        assert!(glob_match_parts(&["**", "file.rs"], &["file.rs"]));
+        assert!(glob_match_parts(&["**", "file.rs"], &["a", "file.rs"]));
+        assert!(glob_match_parts(&["**", "file.rs"], &["a", "b", "file.rs"]));
+        assert!(!glob_match_parts(&["**", "file.rs"], &["a", "b", "other.rs"]));
+    }
+
+    #[test]
+    fn test_glob_star_in_segment() {
+        assert!(glob_match_segment("*", "anything"));
+        assert!(glob_match_segment("*.rs", "main.rs"));
+        assert!(glob_match_segment("file*", "filename"));
+        assert!(glob_match_segment("*name*", "filename"));
+        assert!(!glob_match_segment("*.rs", "main.txt"));
+    }
+
+    #[test]
+    fn test_glob_question_mark() {
+        assert!(glob_match_segment("?", "a"));
+        assert!(glob_match_segment("???", "abc"));
+        assert!(!glob_match_segment("?", "ab"));
+        assert!(!glob_match_segment("???", "ab"));
+    }
+
+    #[test]
+    fn test_is_binary_large_content() {
+        let mut content = vec![b'a'; 10000];
+        assert!(!is_binary(&content));
+        content[9000] = 0;
+        assert!(!is_binary(&content));
+        content[100] = 0;
+        assert!(is_binary(&content));
+    }
 }
