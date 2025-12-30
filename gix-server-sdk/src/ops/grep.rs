@@ -882,4 +882,68 @@ mod tests {
         let result = count_pattern_in_blob(&TreeObjects, Some(tree_id), &regex);
         assert_eq!(result.unwrap(), 0);
     }
+
+    #[test]
+    fn test_grep_blob_with_options_max_matches() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("git init failed");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("git config email failed");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("git config name failed");
+
+        std::fs::write(
+            path.join("test.txt"),
+            "test one\ntest two\ntest three\ntest four\n",
+        )
+        .expect("failed to write file");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()
+            .expect("git add failed");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(path)
+            .output()
+            .expect("git commit failed");
+
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:test.txt"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse failed");
+        let blob_id_str = String::from_utf8_lossy(&output.stdout);
+        let blob_id = gix_hash::ObjectId::from_hex(blob_id_str.trim().as_bytes())
+            .expect("failed to parse blob id");
+
+        let pool = crate::RepoPool::new(crate::SdkConfig::default());
+        let handle = pool.get(path).expect("failed to get handle");
+
+        let results = grep_blob_with_options(&handle, blob_id, "test", false, false, Some(2))
+            .expect("grep failed");
+        assert_eq!(results.len(), 2, "should return exactly 2 matches");
+
+        let results = grep_blob_with_options(&handle, blob_id, "test", false, false, Some(1))
+            .expect("grep failed");
+        assert_eq!(results.len(), 1, "should return exactly 1 match");
+
+        let results = grep_blob_with_options(&handle, blob_id, "test", false, false, None)
+            .expect("grep failed");
+        assert_eq!(results.len(), 4, "should return all 4 matches without limit");
+    }
 }
